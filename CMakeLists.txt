@@ -6,6 +6,7 @@ PROJECT(eve2mysql)
 #string(REPLACE ";" " " CMAKE_CXX_FLAGS "${CXX_FLAGS}")
 
 
+ADD_DEFINITIONS("-Wall -g")
 AUX_SOURCE_DIRECTORY(. SRC_LIST)
 ADD_EXECUTABLE(eve2mysql ${SRC_LIST})
 TARGET_LINK_LIBRARIES(eve2mysql libmysqlclient.so)
