@@ -1,21 +1,23 @@
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <mysql/mysql.h>
 #include "cJSON.h"
 
-#define CONFILE "/etc/suricata/ids_mysql.conf"
+char ids_mysql_conf[128]; 
+char ids_eve_file[128];
 
 MYSQL mysql;
 char mysqlUserName[128] ;
 char mysqlPasswd[128] ;
 char mysqlDbName[128];
 
-int ParseConf()
+int parse_mysql_conf()
 {
-	FILE *fp = fopen(CONFILE, "r");
+	FILE *fp = fopen(ids_mysql_conf, "r");
 
 	if (!fp ) {
-		printf("Failed to open file %s \n", CONFILE);
+		printf("Failed to open file %s \n", ids_mysql_conf);
 		return -1;
 	}
 	char buf[256] = {0};
@@ -57,7 +59,7 @@ int ParseConf()
 
 
 
-int MysqlInit()
+int create_mysql()
 {
 
 	if (NULL == mysql_init(&mysql)) {
@@ -78,21 +80,75 @@ int MysqlInit()
 	return 0;
 }
 
-int ConvertEve()
+int convert_eve()
 {
 
 }
 
-int main()
+int g_daemon;
+
+void usage()
 {
+    printf("Usage:\n");
+    printf("\teve2mysql -c <ids msql configure file>\n");
+    printf("\t          -e <ids eve.json file>>\n");
+    printf("\t          -d  run as background\n");
+    printf("\t          -h  show this help informoation\n");
+}
 
-	if (ParseConf() < 0)
+int parse_args(int argc, char **argv)
+{
+    int flg =0;
+	int ch = -1;
+	int is_ids_eve_file, is_ids_mysql_file;
+	is_ids_eve_file =  is_ids_mysql_file = 0;
+    while ((ch = getopt(argc, argv, "e:c:dh")) != -1) {
+        switch (ch)
+        {
+            case 'e':
+                strncpy(ids_eve_file, optarg, sizeof(ids_eve_file));
+				is_ids_eve_file = 1;
+                break;
+            case 'c':
+                strncpy(ids_mysql_conf, optarg, sizeof(ids_mysql_conf));
+				is_ids_mysql_file = 1;
+                break;
+            case 'd':
+                g_daemon = 1;
+                break;
+            case 'h':
+            case '?':
+            default :
+                return -1;
+        }
+    }
+
+	if (!is_ids_eve_file || !is_ids_mysql_file) {
+		printf("must specify ids eve.json file and ids mysql configure file!\n");
+		return -1;
+	}
+
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (parse_args(argc, argv) < 0)  {
+		usage();
+		return -1;
+	}
+
+	if (g_daemon == 1) {
+		daemon(1, 0);
+	}
+
+	if (parse_mysql_conf() < 0)
 		return -1;
 
-	if (MysqlInit() < 0) 
+	if (create_mysql() < 0) 
 		return -1;
 
-	if (ConvertEve() < 0) 
+	if (convert_eve() < 0) 
 		return -1;
 
 	return 0;
