@@ -1,9 +1,12 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <mysql/mysql.h>
 #include "cJSON.h"
+#include "sfghash.h"
 
 #define FILE_LINE_LEN 4089
 
@@ -17,7 +20,16 @@ MYSQL mysql;
 char mysqlUserName[128] ;
 char mysqlPasswd[128] ;
 char mysqlDbName[128];
+SFGHASH * sid_hash = NULL;
 
+long long get_cur_mstime()
+{
+	struct timeval tv;
+	gettimeofday(&tv,NULL);
+	long long curtime = tv.tv_sec*1000*1000 + tv.tv_usec;
+
+	return curtime;
+}
 
 int parse_mysql_conf()
 {
@@ -64,10 +76,14 @@ int parse_mysql_conf()
 }
 
 
-
-
-int create_mysql()
+void freehash ( void * p )
 {
+	free(p);
+}
+
+int init()
+{
+	 sid_hash = sfghash_new( 10000, 0 , 0, freehash);
 
 	if (NULL == mysql_init(&mysql)) {
 		printf("mysql_init(): %s\n", mysql_error(&mysql));
@@ -86,6 +102,50 @@ int create_mysql()
 
 	return 0;
 }
+
+int write_to_db(char* query_statement)
+{
+		int ret = mysql_query(&mysql, query_statement);
+		if ( ret != 0) {
+			dbg("mysql_query() error: %s", mysql_error(&mysql));
+		} 
+
+		MYSQL_RES       *res = NULL;
+		do {
+
+			res = mysql_use_result(&mysql);
+			mysql_free_result(res);
+		} while (!mysql_next_result(&mysql));
+
+		return 0;
+}
+
+int is_ipv6(char *s)
+{
+	int len = strlen(s);
+	if (s[0] == ':' || s[len - 1] == ':')
+		return 0;
+	int count_colon = 0;
+	int count_bit=0;
+	for (int i = 0; i < len; i++) {
+		if ((s[i]<'a' || s[i] > 'f') && (s[i] < 'A' || s[i] > 'F') && (s[i] < '0' || s[i] > '9')&&s[i]!=':')
+			return 0;
+		count_bit++;
+		if (s[i] == ':') {
+			count_bit = 0;
+			count_colon++;
+			if (s[i + 1] == ':')
+				return 0;
+		}
+		if (count_bit > 4)
+			return 0;
+	}
+	if (count_colon != 7)
+		return 0;
+
+	return 1;
+}
+
 /*
  * json data example:
  *
@@ -118,6 +178,7 @@ int parse_evejson(char *data)
 	cJSON* item_msg = cJSON_GetObjectItem(item_alert, "signature");
 	cJSON* item_category = cJSON_GetObjectItem(item_alert, "category");
 	cJSON* item_severity = cJSON_GetObjectItem(item_alert, "severity");
+	cJSON* item_payload = cJSON_GetObjectItem(item_alert, "payload");
 
 	char timestamp[64]; 
 	char srcip[64]; 
@@ -130,6 +191,7 @@ int parse_evejson(char *data)
 	char msg[512]; 
 	char category[128];
 	int severity;
+	char payload[4096];
 
 
 	if (item_sid == NULL )
@@ -185,29 +247,69 @@ int parse_evejson(char *data)
 	else 
 		memset (timestamp, 0, sizeof(timestamp));
 
+	if (item_timestatmp != NULL) 
+		strncpy(payload, item_payload->valuestring, sizeof(payload));
+	else 
+		memset(payload, 0, sizeof(payload));
+
 	sid = item_sid->valueint;
 
+	/*
 	snprintf(json_value, sizeof(json_value), "%ld,\"%s\",\"%s\",%d,\"%s\",\"%d\",\"%s\",\"%s\", %d,%d,\"%s\"", 
 			sid, msg, srcip, srcport, dstip, dstport, proto, category, severity, rev, timestamp);
 
 	snprintf(query_statement, sizeof(query_statement), "insert into  ids_alert_event(sid,msg,src_ip,src_port,dst_ip,dst_port,protocol,risk_category,risk_level,rule_version, create_time) value (%s)", json_value);
+	*/
 
-	dbg("%s", query_statement);
+	char ip_type[16]= "";
+	if (is_ipv6(srcip) ) 
+		strcpy(ip_type, "ipv6");
+	else 
+		strcpy(ip_type, "ipv4");
 
-	int ret = mysql_query(&mysql, query_statement);
-	if ( ret != 0) {
-		dbg("mysql_query() error: %s", mysql_error(&mysql));
+	char *event_result = "成功";
+	char pkt_hex[4096] = {0};
+    char pkt_ascii[4096] = {0};
+	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%s\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
+
+    snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip,"",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
+    snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rev) value (%s)", json_value);
+
+	long long current_time = get_cur_mstime()/1000;
+
+	char string_sid[32], string_time[32];
+	snprintf(string_sid, sizeof(string_sid), "%ld", sid);
+	snprintf(string_time, sizeof(string_time), "%lld", current_time);
+
+	char *ret_time = (char*) sfghash_find(sid_hash, string_sid);
+	if (ret_time != NULL) {
+		if (current_time - atoll(ret_time) > 10000) {
+			write_to_db(query_statement);
+			sfghash_remove(sid_hash, string_sid);
+			int ret = sfghash_add2(sid_hash, string_sid, string_time);
+			if ( ret == SFGHASH_OK) {
+				dbg("added key:%s, val: %s", string_sid, string_time );
+			}else if (ret == SFGHASH_NOMEM) {
+				dbg("no memory!");
+			} else if (ret == SFGHASH_ERR) {
+				dbg("add error!");
+			}
+		}
+		cJSON_Delete(root);
+	} else {
+		write_to_db(query_statement);
+		int ret = sfghash_add2(sid_hash, string_sid, string_time);
+		if ( ret == SFGHASH_OK) {
+			dbg("added key:%s, val: %s", string_sid, string_time );
+		}else if (ret == SFGHASH_NOMEM) {
+			dbg("no memory!");
+		} else if (ret == SFGHASH_ERR) {
+			dbg("add error!");
+		}
+
+
+		cJSON_Delete(root);
 	}
-
-	MYSQL_RES       *res = NULL;
-	do {
-
-		res = mysql_use_result(&mysql);
-		mysql_free_result(res);
-	} while (!mysql_next_result(&mysql));
-
-
-	cJSON_Delete(root);
 
 	return 0;
 }
@@ -238,7 +340,6 @@ int convert_eve()
 		g_curr_offset += len;
 
 		if (strstr(text, "event_type\":\"alert\"") ) {
-			dbg("%s", text);
 			parse_evejson(text);
 		}
 	}
@@ -307,7 +408,7 @@ int main(int argc, char **argv)
 	if (parse_mysql_conf() < 0)
 		return -1;
 
-	if (create_mysql() < 0) 
+	if (init() < 0) 
 		return -1;
 
 	while (1) {
