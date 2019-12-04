@@ -248,7 +248,7 @@ int parse_evejson(char *data)
 	else 
 		memset (timestamp, 0, sizeof(timestamp));
 
-	if (item_timestatmp != NULL) 
+	if (item_payload != NULL) 
 		strncpy(payload, item_payload->valuestring, sizeof(payload));
 	else 
 		memset(payload, 0, sizeof(payload));
