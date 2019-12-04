@@ -280,23 +280,24 @@ int parse_evejson(char *data)
 	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
 
     snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
-	//dbg("%s", json_value);
     snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rule_rev) value (%s)", json_value);
 
 	long long current_time = get_cur_mstime()/1000;
 
-	char string_sid[32], string_time[32];
-	snprintf(string_sid, sizeof(string_sid), "%ld", sid);
+	char key[256];
+	snprintf(key, sizeof(key), "%ld, %s, %d, %s, %d", sid, srcip, srcport, dstip, dstport);
+	char string_time[32];
 	snprintf(string_time, sizeof(string_time), "%lld", current_time);
 
-	char *ret_time = (char*) sfghash_find(sid_hash, string_sid);
+	char *ret_time = (char*) sfghash_find(sid_hash, key);
 	if (ret_time != NULL) {
 		if (current_time - atoll(ret_time) > 10000) {
 			write_to_db(query_statement);
-			sfghash_remove(sid_hash, string_sid);
-			int ret = sfghash_add2(sid_hash, string_sid, string_time);
+			dbg("%s", query_statement);
+			sfghash_remove(sid_hash, key);
+			int ret = sfghash_add2(sid_hash, key, string_time);
 			if ( ret == SFGHASH_OK) {
-				dbg("added key:%s, val: %s", string_sid, string_time );
+				dbg("added key:%s, val: %s", key, string_time );
 			}else if (ret == SFGHASH_NOMEM) {
 				dbg("no memory!");
 			} else if (ret == SFGHASH_ERR) {
@@ -306,9 +307,10 @@ int parse_evejson(char *data)
 		cJSON_Delete(root);
 	} else {
 		write_to_db(query_statement);
-		int ret = sfghash_add2(sid_hash, string_sid, string_time);
+		dbg("%s", query_statement);
+		int ret = sfghash_add2(sid_hash, key, string_time);
 		if ( ret == SFGHASH_OK) {
-			dbg("added key:%s, val: %s", string_sid, string_time );
+			dbg("added key:%s, val: %s", key, string_time );
 		}else if (ret == SFGHASH_NOMEM) {
 			dbg("no memory!");
 		} else if (ret == SFGHASH_ERR) {
