@@ -175,6 +175,7 @@ int parse_evejson(char *data)
 	cJSON* item_proto = cJSON_GetObjectItem(root, "proto");
 
 	cJSON* item_alert = cJSON_GetObjectItem(root, "alert");
+	cJSON* item_payload = cJSON_GetObjectItem(root, "payload");
 
 	if (item_alert == NULL) 
 		return -1;
@@ -184,7 +185,6 @@ int parse_evejson(char *data)
 	cJSON* item_msg = cJSON_GetObjectItem(item_alert, "signature");
 	cJSON* item_category = cJSON_GetObjectItem(item_alert, "category");
 	cJSON* item_severity = cJSON_GetObjectItem(item_alert, "severity");
-	cJSON* item_payload = cJSON_GetObjectItem(item_alert, "payload");
 
 	char timestamp[64]; 
 	char srcip[64]; 
@@ -255,8 +255,9 @@ int parse_evejson(char *data)
 
 	if (item_payload != NULL) 
 		strncpy(payload, item_payload->valuestring, sizeof(payload));
-	else 
+	else  
 		memset(payload, 0, sizeof(payload));
+	
 
 	sid = item_sid->valueint;
 
@@ -279,6 +280,7 @@ int parse_evejson(char *data)
 	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
 
     snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
+	//dbg("%s", json_value);
     snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rule_rev) value (%s)", json_value);
 
 	long long current_time = get_cur_mstime()/1000;
