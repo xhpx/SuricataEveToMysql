@@ -127,7 +127,8 @@ int is_ipv6(char *s)
 		return 0;
 	int count_colon = 0;
 	int count_bit=0;
-	for (int i = 0; i < len; i++) {
+	int i;
+	for (i = 0; i < len; i++) {
 		if ((s[i]<'a' || s[i] > 'f') && (s[i] < 'A' || s[i] > 'F') && (s[i] < '0' || s[i] > '9')&&s[i]!=':')
 			return 0;
 		count_bit++;
