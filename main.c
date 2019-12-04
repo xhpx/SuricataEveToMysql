@@ -9,12 +9,16 @@
 #include "sfghash.h"
 
 #define FILE_LINE_LEN 4089
+#define DEFAULT_IDS_EVE_FILE "/var/log/suricata/eve.json"
+#define DEFAULT_IDS_MYSQL_CONF "/etc/suricata/ids_mysql.conf"
 
 #define dbg(fmt, args...) printf("\033[33m[%s:%s:%d]\033[0m "#fmt"\r\n", __FILE__, __func__, __LINE__, ##args);
 
 char ids_mysql_conf[128]; 
 char ids_eve_file[128];
 long g_curr_offset = 0;
+
+int is_ids_eve_file, is_ids_mysql_file;
 
 MYSQL mysql;
 char mysqlUserName[128] ;
@@ -83,6 +87,7 @@ void freehash ( void * p )
 
 int init()
 {
+
 	 sid_hash = sfghash_new( 10000, 0 , 0, freehash);
 
 	if (NULL == mysql_init(&mysql)) {
@@ -271,9 +276,9 @@ int parse_evejson(char *data)
 	char *event_result = "成功";
 	char pkt_hex[4096] = {0};
     char pkt_ascii[4096] = {0};
-	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%s\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
+	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
 
-    snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip,"",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
+    snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
     snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rev) value (%s)", json_value);
 
 	long long current_time = get_cur_mstime()/1000;
@@ -355,8 +360,8 @@ int g_daemon;
 void usage()
 {
     printf("Usage:\n");
-    printf("\teve2mysql -c <ids msql configure file>\n");
-    printf("\t          -e <ids eve.json file>>\n");
+    printf("\teve2mysql -c <ids msql configure file> default:\"/etc/suricata/ids_mysql.conf\"\n");
+    printf("\t          -e <ids eve.json file> default:\"/var/log/suricata/eve.json\"\n");
     printf("\t          -d  run as background\n");
     printf("\t          -h  show this help informoation\n");
 }
@@ -364,7 +369,6 @@ void usage()
 int parse_args(int argc, char **argv)
 {
 	int ch = -1;
-	int is_ids_eve_file, is_ids_mysql_file;
 	is_ids_eve_file =  is_ids_mysql_file = 0;
     while ((ch = getopt(argc, argv, "e:c:dh")) != -1) {
         switch (ch)
@@ -387,9 +391,19 @@ int parse_args(int argc, char **argv)
         }
     }
 
+	/*
 	if (!is_ids_eve_file || !is_ids_mysql_file) {
 		printf("must specify ids eve.json file and ids mysql configure file!\n");
 		return -1;
+	}
+	*/
+
+	if (is_ids_mysql_file == 0) {
+		strncpy(ids_mysql_conf, DEFAULT_IDS_MYSQL_CONF, sizeof(ids_mysql_conf));
+	}
+
+	if (is_ids_eve_file == 0) {
+		strncpy(ids_eve_file, DEFAULT_IDS_EVE_FILE, sizeof(ids_eve_file));
 	}
 
     return 0;
