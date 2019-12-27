@@ -7,6 +7,7 @@
 #include <mysql/mysql.h>
 #include "cJSON.h"
 #include "sfghash.h"
+#include "b64.h"
 
 #define FILE_LINE_LEN 4089
 #define DEFAULT_IDS_EVE_FILE "/var/log/suricata/eve.json"
@@ -177,6 +178,8 @@ int parse_evejson(char *data)
 	cJSON* item_alert = cJSON_GetObjectItem(root, "alert");
 	cJSON* item_payload = cJSON_GetObjectItem(root, "payload");
 
+	cJSON* item_payload_printable = cJSON_GetObjectItem(root, "payload_printable");
+
 	if (item_alert == NULL) 
 		return -1;
 
@@ -198,7 +201,9 @@ int parse_evejson(char *data)
 	char category[128];
 	int severity;
 	char payload[4096];
+	char payload_printable[4096];
 
+	char *event_result = "成功";
 
 	if (item_sid == NULL )
 		return -1;
@@ -253,14 +258,24 @@ int parse_evejson(char *data)
 	else 
 		memset (timestamp, 0, sizeof(timestamp));
 
-	if (item_payload != NULL) 
+	if (item_payload != NULL) {
 		strncpy(payload, item_payload->valuestring, sizeof(payload));
-	else  
+	} else  {
 		memset(payload, 0, sizeof(payload));
+	}
 	
+	char *payload_hex = b64_decode(payload, strlen(payload));
+	dbg("payload    : %s", payload);
+	dbg("payload hex: %s", payload_hex);
+
+	if (item_payload_printable != NULL) 
+		strncpy(payload_printable, item_payload_printable->valuestring, sizeof(payload_printable));
+	else  
+		memset(payload_printable, 0, sizeof(payload_printable));
 
 	sid = item_sid->valueint;
 
+	
 	/*
 	snprintf(json_value, sizeof(json_value), "%ld,\"%s\",\"%s\",%d,\"%s\",\"%d\",\"%s\",\"%s\", %d,%d,\"%s\"", 
 			sid, msg, srcip, srcport, dstip, dstport, proto, category, severity, rev, timestamp);
@@ -274,12 +289,9 @@ int parse_evejson(char *data)
 	else 
 		strcpy(ip_type, "ipv4");
 
-	char *event_result = "成功";
-	char pkt_hex[4096] = {0};
-    char pkt_ascii[4096] = {0};
 	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
 
-    snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, pkt_hex, payload,timestamp, ip_type, rev);
+    snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, payload_hex, payload_printable,timestamp, ip_type, rev);
     snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rule_rev) value (%s)", json_value);
 
 	long long current_time = get_cur_mstime()/1000;
