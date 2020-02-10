@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <mysql/mysql.h>
+#include <pthread.h>
+#include <librdkafka/rdkafka.h>
 #include "cJSON.h"
 #include "sfghash.h"
 #include "b64.h"
@@ -20,12 +22,31 @@ char ids_eve_file[128];
 long g_curr_offset = 0;
 
 int is_ids_eve_file, is_ids_mysql_file;
+int is_enable_ids;
+int is_log_kafka ;
+int is_ssl;
 
+rd_kafka_topic_t *rkt;
+rd_kafka_t *rk;      
 MYSQL mysql;
 char mysqlUserName[128] ;
 char mysqlPasswd[128] ;
 char mysqlDbName[128];
+
+char brokers[128];
+char topic[128];
+char kafka_passwd[128];
 SFGHASH * sid_hash = NULL;
+
+void thread_sleep(unsigned long sleepSecond)
+{
+    struct timeval t_timeval;
+    t_timeval.tv_sec = (sleepSecond / 1000);
+    t_timeval.tv_usec = (sleepSecond % 1000);
+    select(0, NULL, NULL, NULL, &t_timeval);
+
+    return;
+}
 
 long long get_cur_mstime()
 {
@@ -86,6 +107,146 @@ void freehash ( void * p )
 	free(p);
 }
 
+/*
+ * return 1: enable
+ * return 0: disable
+ */
+int read_enable_ids_flag()
+{
+	
+	int is_kafka = 0;
+	int fields, rc = 0;
+	MYSQL_RES *res = NULL;
+	MYSQL_ROW row;
+	char *query_str = "select * from sys_output_setting";
+	rc = mysql_real_query(&mysql, query_str, strlen(query_str));
+	if (0 != rc) {
+		printf("mysql_real_query(): %s\n", mysql_error(&mysql));
+		return -1;
+	}
+	res = mysql_store_result(&mysql);
+
+	if (NULL == res) {
+		printf("mysql_restore_result(): %s\n", mysql_error(&mysql));
+		return -1;
+	}
+
+	fields = mysql_num_fields(res);
+	while ((row = mysql_fetch_row(res))) {
+		unsigned long *lengths;
+		lengths = mysql_fetch_lengths(res);
+		int i;
+		for (i = 0; i < fields; i++) {
+			if (i == 1) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					if (strstr(row[i], "kafka输出") != NULL)
+						is_kafka = 1;
+				}
+			}
+
+			if (i == 3) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					if (strstr(row[i], "入侵检测") != NULL)
+						if (is_kafka == 1) {
+							is_enable_ids = 1;
+							is_kafka = 0;
+						}
+				}
+			}
+
+
+			if (i == 4) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					if (atoi(row[i]) == 1)
+						is_log_kafka = 1;
+				}
+			}
+
+			if (i == 6) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					is_ssl = atoi(row[i]);
+				}
+			}
+
+			if (i == 7) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					snprintf(brokers, sizeof(brokers), "%s", row[i]);
+				}
+			}
+
+			if (i == 8) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					snprintf(kafka_passwd, sizeof(kafka_passwd), "%s", row[i]);
+				}
+			}
+
+			if (i == 12) {
+				if (lengths[i] > 0 || row[i] != NULL) {
+					snprintf(topic, sizeof(topic), "%s", row[i]);
+				}
+			}
+		}
+
+	}
+
+	mysql_free_result(res);
+
+	return 0;
+}
+void * read_ids_flag_func(void* data)
+{
+	while (1) {
+		read_enable_ids_flag();
+		thread_sleep(5000);
+	}
+
+}
+
+
+static void dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque)
+{
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n",
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition);
+}
+
+int kafka_init()
+{
+	char errstr[512];
+
+	rd_kafka_conf_t *conf;
+	conf = rd_kafka_conf_new();
+
+	if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+				sizeof(errstr)) != RD_KAFKA_CONF_OK){
+		fprintf(stderr, "%s\n", errstr);
+		return -1;
+	}
+
+	rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+	rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+	if(!rk){
+		fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+		rd_kafka_conf_destroy(conf);
+		return -1;
+	}
+
+	rkt = rd_kafka_topic_new(rk, topic, NULL);
+	if (!rkt){
+		fprintf(stderr, "%% Failed to create topic object: %s\n",
+				rd_kafka_err2str(rd_kafka_last_error()));
+		rd_kafka_destroy(rk);
+		return -1;
+	}
+
+	return 0;
+}
 int init()
 {
 
@@ -106,24 +267,62 @@ int init()
 
 	mysql_set_character_set(&mysql, "utf8");
 
+
+	pthread_t id1;
+
+	if (pthread_create(&id1, NULL, read_ids_flag_func, NULL)) {
+		printf( "Failed to start Read Enable IDS Flag Thread\n");
+		return -1;
+	}
+
+	if (is_log_kafka)
+		kafka_init();
+
+
 	return 0;
 }
 
 int write_to_db(char* query_statement)
 {
-		int ret = mysql_query(&mysql, query_statement);
-		if ( ret != 0) {
-			dbg("mysql_query() error: %s", mysql_error(&mysql));
-		} 
+	int ret = mysql_query(&mysql, query_statement);
+	if ( ret != 0) {
+		dbg("mysql_query() error: %s", mysql_error(&mysql));
+	} 
 
-		MYSQL_RES       *res = NULL;
-		do {
+	MYSQL_RES       *res = NULL;
+	do {
 
-			res = mysql_use_result(&mysql);
-			mysql_free_result(res);
-		} while (!mysql_next_result(&mysql));
+		res = mysql_use_result(&mysql);
+		mysql_free_result(res);
+	} while (!mysql_next_result(&mysql));
 
-		return 0;
+	return 0;
+}
+
+//{log_type:"3",id:"id1",equ_ip:"equ_ip1",equ_asset_name:"equ_asset_name1",create_time:"create_time1",severity:"severity1",src_ip:"src_ip1",src_mac:"src_mac1",src_port:"src_port1",src_asset_name:"src_asset_name1",protocol:"protocol1",dst_ip:"dst_ip1",dst_mac:"dst_mac1",dst_port:"dst_port1",dst_asset_name:"dst_asset_name1",src_user_name:"src_user_name1",src_dept_name:"src_dept_name1",dst_user_name:"dst_user_name1",dst_dept_name:"dst_dept_name1",event_name:"event_name1",event_desc:"event_desc1",event_category:"event_category1",event_status:"event_status1"}  
+int write_to_kafka(char* kafka_string)
+{
+	int times = 0;
+	size_t len = strlen(kafka_string);
+	
+	while (times <= 3 ) {
+		if (rd_kafka_produce( rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_COPY, kafka_string, len,
+					NULL, 0, NULL) == -1){
+			fprintf(stderr, "%% Failed to produce to topic %s: %s\n",
+					rd_kafka_topic_name(rkt), rd_kafka_err2str(rd_kafka_last_error()));
+
+			if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+				rd_kafka_poll(rk, 1000);
+				times ++;
+				continue;
+			}
+		}else{
+			fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n",
+					len, rd_kafka_topic_name(rkt));
+		}
+	}
+
+	return 0;
 }
 
 int is_ipv6(char *s)
@@ -153,6 +352,7 @@ int is_ipv6(char *s)
 	return 1;
 }
 
+
 /*
  * json data example:
  *
@@ -165,6 +365,7 @@ int parse_evejson(char *data)
 		return -1;
 
 	char query_statement[1500]; 
+	char kafka_string[1500]; 
 	char json_value[1024];
 
 	cJSON* root = cJSON_Parse(data);
@@ -264,7 +465,7 @@ int parse_evejson(char *data)
 		memset(payload, 0, sizeof(payload));
 	}
 	
-	char *payload_hex = b64_decode(payload, strlen(payload));
+	unsigned char *payload_hex = b64_decode(payload, strlen(payload));
 	dbg("payload    : %s", payload);
 	dbg("payload hex: %s", payload_hex);
 
@@ -301,10 +502,17 @@ int parse_evejson(char *data)
 	char string_time[32];
 	snprintf(string_time, sizeof(string_time), "%lld", current_time);
 
+
+//{log_type:"3",id:"id1",equ_ip:"equ_ip1",equ_asset_name:"equ_asset_name1",create_time:"create_time1",severity:"severity1",src_ip:"src_ip1",src_mac:"src_mac1",src_port:"src_port1",src_asset_name:"src_asset_name1",protocol:"protocol1",dst_ip:"dst_ip1",dst_mac:"dst_mac1",dst_port:"dst_port1",dst_asset_name:"dst_asset_name1",src_user_name:"src_user_name1",src_dept_name:"src_dept_name1",dst_user_name:"dst_user_name1",dst_dept_name:"dst_dept_name1",event_name:"event_name1",event_desc:"event_desc1",event_category:"event_category1",event_status:"event_status1"}  
+
+	snprintf(kafka_string, sizeof(kafka_string),"{log_type:\"3\",id:\" \",equ_ip:\" \",equ_asset_name:\" \",create_time:\"%s\",severity:%d,src_ip:\"%s\",src_mac:\" \",src_port:%d,src_asset_name:\" \",protocol:\" \",dst_ip:\"%s\",dst_mac:\" \",dst_port:%d,dst_asset_name:\" \",src_user_name:\" \",src_dept_name:\" \",dst_user_name:\" \",dst_dept_name:\" \",event_name:\"%s\",event_desc:\" \",event_category:\"%s\",event_status:0}",timestamp, severity, srcip, srcport, dstip, dstport,msg, category );
+
 	char *ret_time = (char*) sfghash_find(sid_hash, key);
 	if (ret_time != NULL) {
 		if (current_time - atoll(ret_time) > 10000) {
 			write_to_db(query_statement);
+			if (is_log_kafka)
+				write_to_kafka(kafka_string);
 			dbg("%s", query_statement);
 			sfghash_remove(sid_hash, key);
 			int ret = sfghash_add2(sid_hash, key, string_time);
@@ -319,6 +527,8 @@ int parse_evejson(char *data)
 		cJSON_Delete(root);
 	} else {
 		write_to_db(query_statement);
+		if (is_log_kafka)
+			write_to_kafka(kafka_string);
 		dbg("%s", query_statement);
 		int ret = sfghash_add2(sid_hash, key, string_time);
 		if ( ret == SFGHASH_OK) {
