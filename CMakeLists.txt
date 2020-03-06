@@ -1,6 +1,6 @@
 
 CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
-PROJECT(eve2mysql) 
+PROJECT(idsoutput) 
 #string(TOUPPER ${CMAKE_BUILD_TYPE} BUILD_TYPE)
 #CMAKE_CXX_FLAGS
 #string(REPLACE ";" " " CMAKE_CXX_FLAGS "${CXX_FLAGS}")
@@ -8,5 +8,5 @@ PROJECT(eve2mysql)
 
 ADD_DEFINITIONS("-Wall -g")
 AUX_SOURCE_DIRECTORY(. SRC_LIST)
-ADD_EXECUTABLE(eve2mysql ${SRC_LIST})
-TARGET_LINK_LIBRARIES(eve2mysql libmysqlclient.so libpthread.so librdkafka.so)
+ADD_EXECUTABLE(idsoutput ${SRC_LIST})
+TARGET_LINK_LIBRARIES(idsoutput libmysqlclient.so libpthread.so librdkafka.so)

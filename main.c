@@ -6,11 +6,15 @@
 #include <sys/time.h>
 #include <mysql/mysql.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <librdkafka/rdkafka.h>
 #include "cJSON.h"
 #include "sfghash.h"
 #include "b64.h"
 
+#define LOGFILE_MAX_SIZE 100*1024*1024
 #define FILE_LINE_LEN 4089
 #define DEFAULT_IDS_EVE_FILE "/var/log/suricata/eve.json"
 #define DEFAULT_IDS_MYSQL_CONF "/etc/suricata/ids_mysql.conf"
@@ -21,10 +25,15 @@ char ids_mysql_conf[128];
 char ids_eve_file[128];
 long g_curr_offset = 0;
 
+int sockfd;
+struct sockaddr_in syslog_addr;
 int is_ids_eve_file, is_ids_mysql_file;
-int is_enable_ids;
+int is_enable_ids_kafka;
+int is_enable_ids_syslog;
 int is_log_kafka ;
+int is_log_syslog;
 int is_ssl;
+int syslog_trans_type;
 
 rd_kafka_topic_t *rkt;
 rd_kafka_t *rk;      
@@ -33,6 +42,8 @@ char mysqlUserName[128] ;
 char mysqlPasswd[128] ;
 char mysqlDbName[128];
 
+char syslog_ip[128];
+int  syslog_port;
 char brokers[128];
 char topic[128];
 char kafka_passwd[128];
@@ -106,12 +117,11 @@ void freehash ( void * p )
 {
 	free(p);
 }
-
 /*
  * return 1: enable
  * return 0: disable
  */
-int read_enable_ids_flag()
+int read_enable_ids_kafka_flag()
 {
 	
 	int fields, rc = 0;
@@ -140,14 +150,13 @@ int read_enable_ids_flag()
 			if (i == 1) {//output_type
 				if (lengths[i] > 0 || row[i] != NULL) {
 					if (strstr(row[i], "入侵检测") != NULL)
-						is_enable_ids = 1;
+						is_enable_ids_kafka = 1;
 				}
 			}
 
 
 			if (i == 2) { //protol
 				if (lengths[i] > 0 || row[i] != NULL) {
-					dbg("%d",atoi(row[i]));
 					is_log_kafka  = atoi(row[i]);
 				}
 			}
@@ -183,11 +192,78 @@ int read_enable_ids_flag()
 
 	return 0;
 }
+/*
+ * return 1: enable
+ * return 0: disable
+ */
+int read_enable_ids_syslog_flag()
+{
+	
+	int fields, rc = 0;
+	MYSQL_RES *res = NULL;
+	MYSQL_ROW row;
+	char *query_str = "select name,output_type,protocol,trans_type,ip from sys_output_setting  where protocol=0";
+	rc = mysql_real_query(&mysql, query_str, strlen(query_str));
+	if (0 != rc) {
+		printf("mysql_real_query(): %s\n", mysql_error(&mysql));
+		return -1;
+	}
+	res = mysql_store_result(&mysql);
+
+	if (NULL == res) {
+		printf("mysql_restore_result(): %s\n", mysql_error(&mysql));
+		return -1;
+	}
+
+	fields = mysql_num_fields(res);
+	while ((row = mysql_fetch_row(res))) {
+		unsigned long *lengths;
+		lengths = mysql_fetch_lengths(res);
+		int i;
+		for (i = 0; i < fields; i++) {
+			if (i == 1) {//output_type
+				if (lengths[i] > 0 || row[i] != NULL) {
+					if (strstr(row[i], "入侵检测") != NULL)
+						is_enable_ids_syslog = 1;
+				}
+			}
+
+
+			if (i == 2) { //protol
+				if (lengths[i] > 0 || row[i] != NULL) {
+					if (atoi(row[i]) == 0)
+						is_log_syslog  = 1;
+				}
+			}
+
+			if (i == 3) {// trans type 
+				if (lengths[i] > 0 || row[i] != NULL) {
+					syslog_trans_type = atoi(row[i]);
+				}
+			}
+
+			if (i == 4) {//ip
+				if (lengths[i] > 0 || row[i] != NULL) {
+					char tmp[16] = {0};
+					sscanf(row[i], "%[^:]:%[^:]", syslog_ip, tmp);
+					syslog_port = atoi(tmp);
+				}
+			}
+
+		}
+
+	}
+
+	mysql_free_result(res);
+
+	return 0;
+}
 void * read_ids_flag_func(void* data)
 {
 	while (1) {
 		thread_sleep(5000);
-		read_enable_ids_flag();
+		read_enable_ids_kafka_flag();
+		read_enable_ids_syslog_flag();
 	}
 
 }
@@ -206,6 +282,31 @@ static void dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void 
                         rkmessage->len, rkmessage->partition);
 */
 		}
+}
+
+int syslog_init()
+{
+
+	syslog_addr.sin_family = AF_INET;
+    syslog_addr.sin_port = htons(syslog_port);
+    syslog_addr.sin_addr.s_addr=inet_addr(syslog_ip);
+    bzero(&(syslog_addr.sin_zero), 8);
+
+	if (syslog_trans_type == 0) {//udp
+		sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+		if (sockfd < 0) {
+			dbg("socket() failed!");
+			return -1;
+		}
+	} else {//tcp
+		sockfd = socket(AF_INET, SOCK_STREAM, 0);
+		if (connect(sockfd,(struct sockaddr*)&syslog_addr,sizeof(struct sockaddr)) < 0) {
+			dbg("coneect to syslog server failed");
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
 int kafka_init()
@@ -260,7 +361,8 @@ int init()
 
 	mysql_set_character_set(&mysql, "utf8");
 
-	read_enable_ids_flag();
+	read_enable_ids_kafka_flag();
+	read_enable_ids_syslog_flag();
 
 	pthread_t id1;
 
@@ -270,16 +372,16 @@ int init()
 	}
 
 	if (is_log_kafka)
-		if (kafka_init() < 0)
-			return -1;
+		kafka_init(); 
 
+	if (is_log_syslog) 
+		syslog_init();
 
 	return 0;
 }
 
 int write_to_db(char* query_statement)
 {
-	dbg("%s", query_statement);
 	int ret = mysql_query(&mysql, query_statement);
 	if ( ret != 0) {
 		dbg("mysql_query() error: %s", mysql_error(&mysql));
@@ -295,10 +397,43 @@ int write_to_db(char* query_statement)
 	return 0;
 }
 
+int write_to_syslog(char* data)
+{
+
+	int times=0;
+	int sended_num = 0;
+
+	int len = strlen(data);
+	if (syslog_trans_type == 0) { //udp
+		while (sended_num < len && times < 2) {
+			int send_num = sendto(sockfd, data + sended_num, len - sended_num, 0, (struct sockaddr*)&syslog_addr, sizeof(struct sockaddr_in));
+			if (send_num  < 0) {
+				break;
+			} else {
+				sended_num += send_num;
+			}
+
+			times ++;
+		}
+	} else { //tcp
+		while (sended_num < len && times < 2) {
+			int send_num = send(sockfd, data + sended_num, len - sended_num, 0);
+			if (send_num  < 0) {
+				break;
+			} else {
+				sended_num += send_num;
+			}
+
+			times ++;
+		}
+	}
+
+	return 0;
+}
+
 //{log_type:"3",id:"id1",equ_ip:"equ_ip1",equ_asset_name:"equ_asset_name1",create_time:"create_time1",severity:"severity1",src_ip:"src_ip1",src_mac:"src_mac1",src_port:"src_port1",src_asset_name:"src_asset_name1",protocol:"protocol1",dst_ip:"dst_ip1",dst_mac:"dst_mac1",dst_port:"dst_port1",dst_asset_name:"dst_asset_name1",src_user_name:"src_user_name1",src_dept_name:"src_dept_name1",dst_user_name:"dst_user_name1",dst_dept_name:"dst_dept_name1",event_name:"event_name1",event_desc:"event_desc1",event_category:"event_category1",event_status:"event_status1"}  
 int write_to_kafka(char* kafka_string)
 {
-	dbg("%s", kafka_string);
 	int times = 0;
 	size_t len = strlen(kafka_string);
 	
@@ -370,6 +505,38 @@ char *GetReadbleDate()
 			tmp_ptr->tm_hour, tmp_ptr->tm_min, tmp_ptr->tm_sec);
 
 	return s;
+}
+int get_category_id(char *category)
+{
+	if (strcmp(category, "sql_injection") == 0)
+		return 1;
+	else if (strcmp(category, "code_execution") == 0)
+		return 2;
+	else if (strcmp(category, "botnet") == 0)
+		return 3;
+	else if (strcmp(category, "network-scan") == 0)
+		return 4;
+	else if (strcmp(category, "denial-of-service") == 0)
+		return 5;
+	else if (strcmp(category, "info_leak") == 0)
+		return 6;
+	else if (strcmp(category, "trojan-activity") == 0)
+		return 7;
+	else if (strcmp(category, "overflow") == 0)
+		return 8;
+	else if (strcmp(category, "worm") == 0)
+		return 9;
+	else if (strcmp(category, "xss") == 0)
+		return 10;
+	else if (strcmp(category, "ics_activity") == 0)
+		return 11;
+	else if (strcmp(category, "privilege_gain") == 0)
+		return 12;
+	else if (strcmp(category, "other_threat") == 0)
+		return 13;
+	else 
+		return 0;
+
 }
 int parse_evejson(char *data)
 {
@@ -478,8 +645,6 @@ int parse_evejson(char *data)
 	}
 	
 	unsigned char *payload_hex = b64_decode(payload, strlen(payload));
-//	dbg("payload    : %s", payload);
-//	dbg("payload hex: %s", payload_hex);
 
 	if (item_payload_printable != NULL) 
 		strncpy(payload_printable, item_payload_printable->valuestring, sizeof(payload_printable));
@@ -502,12 +667,12 @@ int parse_evejson(char *data)
 	else 
 		strcpy(ip_type, "ipv4");
 
-	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
+	char *fmt = "\"%ld\",\"%s\",\"%s\",\"%s\",\"%d\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%d\",\"%s\",\"%d\",  \"%s\",\"%s\",\"%s\",\"%s\", \"%s\",\"%d\"";
 
 	/*temp .. todo
 	  snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, payload_hex, payload_printable,timestamp, ip_type, rev);
 	  */
-	snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, category, srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, payload_hex, payload_printable,GetReadbleDate(), ip_type, rev);
+	snprintf(json_value, sizeof(json_value), fmt, sid, " ", " ", msg, get_category_id(category), srcip, " ", dstip," ",srcport,dstport,proto,severity, event_result, payload_hex, payload_printable,GetReadbleDate(), ip_type, rev);
 	//dbg("%s", json_value);
 	snprintf(query_statement, sizeof(query_statement), "insert into  audit_log_invade_event(sid,engine_name,engine_ip,event_name,event_type,source_ip,source_mac,dst_ip,dst_mac,source_port,dst_port,protocol,risk_level,event_result,original_message_16binary,original_message,create_time,ip_type,rule_rev) value (%s)", json_value);
 
@@ -529,6 +694,8 @@ int parse_evejson(char *data)
 			write_to_db(query_statement);
 			if (is_log_kafka)
 				write_to_kafka(kafka_string);
+			if (is_log_syslog) 
+				write_to_syslog(kafka_string);
 			//dbg("%s", query_statement);
 			sfghash_remove(sid_hash, key);
 			int ret = sfghash_add2(sid_hash, key, string_time);
@@ -545,6 +712,8 @@ int parse_evejson(char *data)
 		write_to_db(query_statement);
 		if (is_log_kafka)
 			write_to_kafka(kafka_string);
+		if (is_log_syslog) 
+			write_to_syslog(kafka_string);
 		dbg("%s", query_statement);
 		int ret = sfghash_add2(sid_hash, key, string_time);
 		if ( ret == SFGHASH_OK) {
@@ -572,6 +741,12 @@ int convert_eve()
 		return -1;
 	}
 
+
+	fseek(fp,0,SEEK_END);
+	long filesize = ftell(fp);
+	if (filesize >= LOGFILE_MAX_SIZE)
+		truncate(ids_eve_file, 0);
+
 	fseek(fp, g_curr_offset, SEEK_SET);
 
 	char text[FILE_LINE_LEN];
@@ -587,6 +762,10 @@ int convert_eve()
 		text[len - 1] = 0;
 		g_curr_offset += len;
 
+		if (g_curr_offset >= LOGFILE_MAX_SIZE) {
+			truncate(ids_eve_file, 0);
+			fseek(fp,0,SEEK_SET);
+		}
 		if (strstr(text, "event_type\":\"alert\"") ) {
 			parse_evejson(text);
 		}
